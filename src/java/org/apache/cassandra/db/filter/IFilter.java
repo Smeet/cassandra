@@ -20,14 +20,19 @@ package org.apache.cassandra.db.filter;
  *
  */
 
-import java.util.Comparator;
-import java.util.Iterator;
-
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.IColumnContainer;
+import org.apache.cassandra.db.SuperColumn;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
+
+import java.util.Comparator;
+import java.util.Iterator;
 
 /**
  * Given an implementation-specific description of what columns to look for, provides methods
@@ -52,6 +57,11 @@ public interface IFilter
      * @param key The key of the row we are about to iterate over
      */
     public abstract IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey<?> key);
+
+    /**
+     * returns an iterator that returns columns for the given file data input. 
+     */
+    public abstract IColumnIterator getDataInputIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key);
 
     /**
      * returns an iterator that returns columns from the given SSTable

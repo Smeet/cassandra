@@ -29,6 +29,8 @@ import java.util.List;
 
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.columniterator.DataInputSliceIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,6 +71,11 @@ public class SliceQueryFilter implements IFilter
     public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey<?> key)
     {
         return new SSTableSliceIterator(sstable, file, key, start, finish, reversed);
+    }
+
+    public IColumnIterator getDataInputIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key)
+    {
+        return new DataInputSliceIterator(metadata, file, key, start, finish, reversed);
     }
 
     public SuperColumn filterSuperColumn(SuperColumn superColumn, int gcBefore)

@@ -18,49 +18,99 @@
 
 package org.apache.cassandra.db;
 
-import java.io.*;
-import java.lang.management.ManagementFactory;
-import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.regex.Pattern;
-import javax.management.*;
-
 import com.google.common.collect.Iterables;
-import org.apache.cassandra.db.compaction.LeveledManifest;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.cache.*;
+import org.apache.cassandra.cache.AutoSavingCache;
+import org.apache.cassandra.cache.AutoSavingKeyCache;
+import org.apache.cassandra.cache.AutoSavingRowCache;
+import org.apache.cassandra.cache.AutoSavingSSTCache;
+import org.apache.cassandra.cache.ConcurrentLinkedHashCache;
+import org.apache.cassandra.cache.ICache;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.config.*;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
+import org.apache.cassandra.db.compaction.LeveledManifest;
 import org.apache.cassandra.db.filter.IFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.dht.*;
-import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.dht.Bounds;
+import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.LocalPartitioner;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTable;
+import org.apache.cassandra.io.sstable.SSTableMetadata;
+import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.io.sstable.SSTableWriter;
+import org.apache.cassandra.io.util.CachedDataInput;
+import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.IndexClause;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.Allocator;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CLibrary;
+import org.apache.cassandra.utils.CloseableIterator;
+import org.apache.cassandra.utils.DefaultInteger;
+import org.apache.cassandra.utils.EstimatedHistogram;
+import org.apache.cassandra.utils.HeapAllocator;
 import org.apache.cassandra.utils.IntervalTree.Interval;
+import org.apache.cassandra.utils.LatencyTracker;
+import org.apache.cassandra.utils.NodeId;
+import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.WrappedRunnable;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.management.InstanceNotFoundException;
+import javax.management.MBeanRegistrationException;
+import javax.management.MBeanServer;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import java.io.File;
+import java.io.FileFilter;
+import java.io.IOError;
+import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 
 public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 {
@@ -135,7 +185,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public static enum CacheType
     {
         KEY_CACHE_TYPE("KeyCache"),
-        ROW_CACHE_TYPE("RowCache");
+        ROW_CACHE_TYPE("RowCache"),
+        SST_CACHE_TYPE("SstCache");
 
         public final String name;
 
@@ -153,6 +204,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public final AutoSavingCache<Pair<Descriptor,DecoratedKey>, Long> keyCache;
     public final AutoSavingCache<DecoratedKey, ColumnFamily> rowCache;
+    public final AutoSavingCache<DecoratedKey, ByteBuffer> sstCache;
 
 
     /** ratio of in-memory memtable size, to serialized size */
@@ -237,6 +289,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         keyCache = new AutoSavingKeyCache<Pair<Descriptor, DecoratedKey>, Long>(kc, table.name, columnFamilyName);
         ICache<DecoratedKey, ColumnFamily> rc = metadata.getRowCacheProvider().create(0, table.name, columnFamilyName);
         rowCache = new AutoSavingRowCache<DecoratedKey, ColumnFamily>(rc, table.name, columnFamilyName);
+
+        sstCache = new AutoSavingSSTCache<DecoratedKey, ByteBuffer>(
+                ConcurrentLinkedHashCache.<DecoratedKey, ByteBuffer>create(0, table.name, columnFamilyName),
+                table.name, columnFamilyName);
 
         // scan for sstables corresponding to this cf and load them
         data = new DataTracker(this);
@@ -1008,9 +1064,49 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     void replaceFlushed(Memtable memtable, SSTableReader sstable)
     {
+        if (sstCache.getCapacity() > 0) {
+            mergeSSTCache(memtable);
+        }
         data.replaceFlushed(memtable, sstable);
         CompactionManager.instance.submitBackground(this);
     }
+
+    private void mergeSSTCache(Memtable memtable) {
+        Iterator<Map.Entry<DecoratedKey, ColumnFamily>> entryIterator = memtable.getEntryIterator();
+        while (entryIterator.hasNext()) {
+            Map.Entry<DecoratedKey, ColumnFamily> entry = entryIterator.next();
+            DecoratedKey key = entry.getKey();
+            ByteBuffer cachedRow = sstCache.get(key);
+            if (cachedRow != null) {
+                // Merge
+                ColumnFamily returnCF = ColumnFamily.create(metadata);
+
+                QueryFilter filter = QueryFilter.getIdentityFilter(key, new QueryPath(columnFamily));
+
+                List<IColumnIterator> iterators = new ArrayList<IColumnIterator>();
+
+                IColumnIterator iter = filter.getMemtableColumnIterator(entry.getValue(), key, getComparator());
+                if (iter != null)
+                {
+                    returnCF.delete(iter.getColumnFamily());
+                    iterators.add(iter);
+                }
+
+                FileDataInput mergedRow = new CachedDataInput(cachedRow);
+                iter = filter.getDataInputIterator(metadata, mergedRow);
+                if (iter.getColumnFamily() != null)
+                {
+                    returnCF.delete(iter.getColumnFamily());
+                    iterators.add(iter);
+                }
+
+                filter.collateColumns(returnCF, iterators, getComparator(), gcBefore());
+
+                sstCache.put(key, CachedDataInput.serialize(returnCF));
+            }
+        }
+    }
+
 
     public boolean isValid()
     {
@@ -1179,7 +1275,19 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         long start = System.nanoTime();
         try
         {
-            if (rowCache.getCapacity() == 0)
+            if (rowCache.getCapacity() > 0)
+            {
+                ColumnFamily cached = cacheRow(filter.key);
+                if (cached == null)
+                    return null;
+
+                return filterColumnFamily(cached, filter, gcBefore);
+            }
+            else if (sstCache.getCapacity() > 0)
+            {
+                return getSSTCachedColumns(filter, gcBefore);
+            }
+            else
             {
                 ColumnFamily cf = getTopLevelColumns(filter, gcBefore, false);
 
@@ -1190,12 +1298,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 // their subcolumns for relevance, so we need to do a second prune post facto here.
                 return cf.isSuper() ? removeDeleted(cf, gcBefore) : removeDeletedCF(cf, gcBefore);
             }
-
-            ColumnFamily cached = cacheRow(filter.key);
-            if (cached == null)
-                return null;
-
-            return filterColumnFamily(cached, filter, gcBefore);
         }
         finally
         {
@@ -1216,6 +1318,96 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         // TODO this is necessary because when we collate supercolumns together, we don't check
         // their subcolumns for relevance, so we need to do a second prune post facto here.
         return cf.isSuper() ? removeDeleted(cf, gcBefore) : removeDeletedCF(cf, gcBefore);
+    }
+
+    private ColumnFamily getSSTCachedColumns(QueryFilter filter, int gcBefore)
+    {
+        // we are querying top-level columns, do a merging fetch with indexes.
+        final ColumnFamily returnCF = ColumnFamily.create(metadata);
+
+        DecoratedKey key = filter.key;
+        ByteBuffer buffer = sstCache.get(key);
+        if (buffer == null)
+        {                                                                                                                        
+            // for cache = false: we dont cache the cf itself
+            ColumnFamily cf = getTopLevelColumns(QueryFilter.getIdentityFilter(key, new QueryPath(columnFamily)), gcBefore, false);
+            if (cf != null) {
+                buffer = CachedDataInput.serialize(cf);
+                sstCache.put(key, buffer);
+
+                return filterColumnFamily(cf, filter, gcBefore);
+            }
+
+            return null;
+        }
+        else
+        {
+            List<IColumnIterator> iterators = new ArrayList<IColumnIterator>();
+            try
+            {
+                IColumnIterator iter;
+                DataTracker.View currentView = data.getView();
+
+                /* add the current memtable */
+                iter = filter.getMemtableColumnIterator(currentView.memtable, getComparator());
+                if (iter != null)
+                {
+                    returnCF.delete(iter.getColumnFamily());
+                    iterators.add(iter);
+                }
+
+                /* add the memtables being flushed */
+                for (Memtable memtable : currentView.memtablesPendingFlush)
+                {
+                    iter = filter.getMemtableColumnIterator(memtable, getComparator());
+                    if (iter != null)
+                    {
+                        returnCF.delete(iter.getColumnFamily());
+                        iterators.add(iter);
+                    }
+                }
+
+                /* add the cached merged row*/
+                FileDataInput mergedRow = new CachedDataInput(buffer);
+                iter = filter.getDataInputIterator(metadata, mergedRow);
+                if (iter.getColumnFamily() != null)
+                {
+                    returnCF.delete(iter.getColumnFamily());
+                    iterators.add(iter);
+                }
+
+                // we need to distinguish between "there is no data at all for this row" (BF will let us rebuild that efficiently)
+                // and "there used to be data, but it's gone now" (we should cache the empty CF so we don't need to rebuild that slower)
+                if (iterators.size() == 0)
+                    return null;
+
+                filter.collateColumns(returnCF, iterators, getComparator(), gcBefore);
+
+                return returnCF.isSuper() ? removeDeleted(returnCF, gcBefore) : removeDeletedCF(returnCF, gcBefore);
+            }
+            catch (Throwable e)
+            {
+                logger.error("error reading", e);
+                throw new RuntimeException(e);
+            }
+            finally
+            {
+                /* close all cursors */
+                for (IColumnIterator ci : iterators)
+                {
+                    try
+                    {
+                        ci.close();
+                    }
+                    catch (Throwable th)
+                    {
+                        logger.error("error closing " + ci, th);
+                    }
+                }
+            }
+
+        }
+
     }
 
     /**

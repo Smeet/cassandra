@@ -21,13 +21,13 @@ package org.apache.cassandra.db.filter;
  */
 
 
-import java.nio.ByteBuffer;
-import java.util.*;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.IColumnContainer;
+import org.apache.cassandra.db.Memtable;
+import org.apache.cassandra.db.SuperColumn;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -37,6 +37,15 @@ import org.apache.cassandra.thrift.SlicePredicate;
 import org.apache.cassandra.thrift.SliceRange;
 import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.MergeIterator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.ByteBuffer;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 public class QueryFilter
 {
@@ -84,6 +93,12 @@ public class QueryFilter
         if (path.superColumnName == null)
             return filter.getSSTableColumnIterator(sstable, file, key);
         return superFilter.getSSTableColumnIterator(sstable, file, key);
+    }
+
+    public IColumnIterator getDataInputIterator(CFMetaData metaData, FileDataInput mergedRow) {
+        if (path.superColumnName == null)
+            return filter.getDataInputIterator(metaData, mergedRow, key);
+        return superFilter.getDataInputIterator(metaData, mergedRow, key);
     }
 
     // TODO move gcBefore into a field

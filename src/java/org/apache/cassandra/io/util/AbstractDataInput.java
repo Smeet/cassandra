@@ -191,7 +191,7 @@ public abstract class AbstractDataInput extends InputStream implements DataInput
      * @throws IOException
      *             if this file is closed or another I/O error occurs.
      */
-    public final int readInt() throws IOException {
+    public int readInt() throws IOException {
         byte[] buffer = new byte[4];
         if (read(buffer, 0, buffer.length) != buffer.length) {
             throw new EOFException();
@@ -255,7 +255,7 @@ public abstract class AbstractDataInput extends InputStream implements DataInput
      * @throws IOException
      *             if this file is closed or another I/O error occurs.
      */
-    public final long readLong() throws IOException {
+    public long readLong() throws IOException {
         byte[] buffer = new byte[8];
         int n = read(buffer, 0, buffer.length);
         if (n != buffer.length) {

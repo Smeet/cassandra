@@ -21,20 +21,26 @@ package org.apache.cassandra.db.filter;
  */
 
 
-import java.nio.ByteBuffer;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.SortedSet;
-
-import org.apache.commons.lang.StringUtils;
-
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.IColumnContainer;
+import org.apache.cassandra.db.Memtable;
+import org.apache.cassandra.db.SuperColumn;
+import org.apache.cassandra.db.columniterator.DataInputNamesIterator;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.SSTableNamesIterator;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.commons.lang.StringUtils;
+
+import java.nio.ByteBuffer;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.SortedSet;
 
 public class NamesQueryFilter implements IFilter
 {
@@ -63,6 +69,11 @@ public class NamesQueryFilter implements IFilter
     public IColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey<?> key)
     {
         return new SSTableNamesIterator(sstable, file, key, columns);
+    }
+
+    public IColumnIterator getDataInputIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key)
+    {
+        return new DataInputNamesIterator(metadata, file, key, columns);
     }
 
     public SuperColumn filterSuperColumn(SuperColumn superColumn, int gcBefore)

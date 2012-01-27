@@ -27,17 +27,17 @@ import org.apache.cassandra.db.DecoratedKey;
 
 import java.nio.ByteBuffer;
 
-public class AutoSavingRowCache<K extends DecoratedKey, V> extends AutoSavingCache<K, V>
+public class AutoSavingSSTCache<K extends DecoratedKey, V> extends AutoSavingCache<K, V>
 {
-    public AutoSavingRowCache(ICache<K, V> cache, String tableName, String cfName)
+    public AutoSavingSSTCache(ICache<K, V> cache, String tableName, String cfName)
     {
-        super(cache, tableName, cfName, ColumnFamilyStore.CacheType.ROW_CACHE_TYPE);
+        super(cache, tableName, cfName, ColumnFamilyStore.CacheType.SST_CACHE_TYPE);
     }
 
     @Override
     public double getConfiguredCacheSize(CFMetaData cfm)
     {
-        return cfm == null || CFMetaData.USE_SSTABLE_CACHE ? CFMetaData.DEFAULT_ROW_CACHE_SIZE : cfm.getRowCacheSize();
+        return cfm == null || !CFMetaData.USE_SSTABLE_CACHE ? CFMetaData.DEFAULT_ROW_CACHE_SIZE : cfm.getRowCacheSize();
     }
 
     @Override
