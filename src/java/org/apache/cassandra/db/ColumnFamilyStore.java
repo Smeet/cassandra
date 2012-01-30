@@ -1991,6 +1991,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         long keys = estimateKeys();
         keyCache.updateCacheSize(keys);
         rowCache.updateCacheSize(keys);
+        sstCache.updateCacheSize(keys);
     }
 
     public long[] getEstimatedRowSizeHistogram()
