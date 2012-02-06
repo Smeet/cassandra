@@ -1281,7 +1281,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 if (cached == null)
                     return null;
 
-                return filterColumnFamily(cached, filter, gcBefore);
+                return filterColumnFamilyWithMemtables(cached, filter, gcBefore);
             }
             else if (sstCache.getCapacity() > 0)
             {
@@ -1302,6 +1302,55 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         finally
         {
             readStats.addNano(System.nanoTime() - start);
+        }
+    }
+
+    /**
+     *  Filter a cached row, which will not be modified by the filter, but may be modified by throwing out
+     *  tombstones that are no longer relevant.
+     *  The returned column family won't be thread safe.
+     */
+    ColumnFamily filterColumnFamilyWithMemtables(ColumnFamily cached, QueryFilter filter, int gcBefore)
+    {
+        ColumnFamily returnCF = cached.cloneMeShallow(ArrayBackedSortedColumns.factory(), filter.filter.isReversed());
+        List<IColumnIterator> iterators = new ArrayList<IColumnIterator>();
+        try
+        {
+            IColumnIterator iter;
+            DataTracker.View currentView = data.getView();
+
+            /* add memtables */
+            for (Memtable memtable : Iterables.concat(Collections.singleton(currentView.memtable), currentView.memtablesPendingFlush))
+            {
+                iter = filter.getMemtableColumnIterator(memtable, metadata.comparator);
+                if (iter != null)
+                {
+                    returnCF.delete(iter.getColumnFamily());
+                    iterators.add(iter);
+                }
+            }
+
+            iter = filter.getMemtableColumnIterator(cached, null, metadata.comparator);
+            if (iter != null)
+            {
+                returnCF.delete(iter.getColumnFamily());
+                iterators.add(iter);
+            }
+
+            if (iterators.size() == 0)
+                return null;
+
+            filter.collateColumns(returnCF, iterators, getComparator(), gcBefore);
+
+            return returnCF.isSuper() ? removeDeleted(returnCF, gcBefore) : removeDeletedCF(returnCF, gcBefore);
+        }
+        finally
+        {
+            /* close all cursors */
+            for (IColumnIterator ci : iterators)
+            {
+                FileUtils.closeQuietly(ci);
+            }
         }
     }
 
@@ -1348,18 +1397,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 IColumnIterator iter;
                 DataTracker.View currentView = data.getView();
 
-                /* add the current memtable */
-                iter = filter.getMemtableColumnIterator(currentView.memtable, getComparator());
-                if (iter != null)
+                /* add memtables */
+                for (Memtable memtable : Iterables.concat(Collections.singleton(currentView.memtable), currentView.memtablesPendingFlush))
                 {
-                    returnCF.delete(iter.getColumnFamily());
-                    iterators.add(iter);
-                }
-
-                /* add the memtables being flushed */
-                for (Memtable memtable : currentView.memtablesPendingFlush)
-                {
-                    iter = filter.getMemtableColumnIterator(memtable, getComparator());
+                    iter = filter.getMemtableColumnIterator(memtable, metadata.comparator);
                     if (iter != null)
                     {
                         returnCF.delete(iter.getColumnFamily());
@@ -1381,7 +1422,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 if (iterators.size() == 0)
                     return null;
 
-                filter.collateColumns(returnCF, iterators, getComparator(), gcBefore);
+                filter.collateColumns(returnCF, iterators, metadata.comparator, gcBefore);
 
                 return returnCF.isSuper() ? removeDeleted(returnCF, gcBefore) : removeDeletedCF(returnCF, gcBefore);
             }
@@ -1395,17 +1436,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 /* close all cursors */
                 for (IColumnIterator ci : iterators)
                 {
-                    try
-                    {
-                        ci.close();
-                    }
-                    catch (Throwable th)
-                    {
-                        logger.error("error closing " + ci, th);
-                    }
+                    FileUtils.closeQuietly(ci);
                 }
             }
-
         }
 
     }
