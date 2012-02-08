@@ -204,8 +204,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public final AutoSavingCache<Pair<Descriptor,DecoratedKey>, Long> keyCache;
     public final AutoSavingCache<DecoratedKey, ColumnFamily> rowCache;
+    
     public final AutoSavingCache<DecoratedKey, ByteBuffer> sstCache;
-
 
     /** ratio of in-memory memtable size, to serialized size */
     volatile double liveRatio = 1.0;
@@ -1281,7 +1281,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 if (cached == null)
                     return null;
 
-                return filterColumnFamilyWithMemtables(cached, filter, gcBefore);
+                return filterColumnFamily(cached, filter, gcBefore);
             }
             else if (sstCache.getCapacity() > 0)
             {
@@ -1310,55 +1310,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
      *  tombstones that are no longer relevant.
      *  The returned column family won't be thread safe.
      */
-    ColumnFamily filterColumnFamilyWithMemtables(ColumnFamily cached, QueryFilter filter, int gcBefore)
-    {
-        ColumnFamily returnCF = cached.cloneMeShallow(ArrayBackedSortedColumns.factory(), filter.filter.isReversed());
-        List<IColumnIterator> iterators = new ArrayList<IColumnIterator>();
-        try
-        {
-            IColumnIterator iter;
-            DataTracker.View currentView = data.getView();
-
-            /* add memtables */
-            for (Memtable memtable : Iterables.concat(Collections.singleton(currentView.memtable), currentView.memtablesPendingFlush))
-            {
-                iter = filter.getMemtableColumnIterator(memtable, metadata.comparator);
-                if (iter != null)
-                {
-                    returnCF.delete(iter.getColumnFamily());
-                    iterators.add(iter);
-                }
-            }
-
-            iter = filter.getMemtableColumnIterator(cached, null, metadata.comparator);
-            if (iter != null)
-            {
-                returnCF.delete(iter.getColumnFamily());
-                iterators.add(iter);
-            }
-
-            if (iterators.size() == 0)
-                return null;
-
-            filter.collateColumns(returnCF, iterators, getComparator(), gcBefore);
-
-            return returnCF.isSuper() ? removeDeleted(returnCF, gcBefore) : removeDeletedCF(returnCF, gcBefore);
-        }
-        finally
-        {
-            /* close all cursors */
-            for (IColumnIterator ci : iterators)
-            {
-                FileUtils.closeQuietly(ci);
-            }
-        }
-    }
-
-    /**
-     *  Filter a cached row, which will not be modified by the filter, but may be modified by throwing out
-     *  tombstones that are no longer relevant.
-     *  The returned column family won't be thread safe.
-     */
     ColumnFamily filterColumnFamily(ColumnFamily cached, QueryFilter filter, int gcBefore)
     {
         ColumnFamily cf = cached.cloneMeShallow(ArrayBackedSortedColumns.factory(), filter.filter.isReversed());
@@ -1371,9 +1322,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     private ColumnFamily getSSTCachedColumns(QueryFilter filter, int gcBefore)
     {
-        // we are querying top-level columns, do a merging fetch with indexes.
-        final ColumnFamily returnCF = ColumnFamily.create(metadata);
-
         DecoratedKey key = filter.key;
         ByteBuffer buffer = sstCache.get(key);
         if (buffer == null)
@@ -1391,54 +1339,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
         else
         {
-            List<IColumnIterator> iterators = new ArrayList<IColumnIterator>();
-            try
-            {
-                IColumnIterator iter;
-                DataTracker.View currentView = data.getView();
-
-                /* add memtables */
-                for (Memtable memtable : Iterables.concat(Collections.singleton(currentView.memtable), currentView.memtablesPendingFlush))
-                {
-                    iter = filter.getMemtableColumnIterator(memtable, metadata.comparator);
-                    if (iter != null)
-                    {
-                        returnCF.delete(iter.getColumnFamily());
-                        iterators.add(iter);
-                    }
-                }
-
-                /* add the cached merged row*/
-                FileDataInput mergedRow = new CachedDataInput(buffer);
-                iter = filter.getDataInputIterator(metadata, mergedRow);
-                if (iter.getColumnFamily() != null)
-                {
-                    returnCF.delete(iter.getColumnFamily());
-                    iterators.add(iter);
-                }
-
-                // we need to distinguish between "there is no data at all for this row" (BF will let us rebuild that efficiently)
-                // and "there used to be data, but it's gone now" (we should cache the empty CF so we don't need to rebuild that slower)
-                if (iterators.size() == 0)
-                    return null;
-
-                filter.collateColumns(returnCF, iterators, metadata.comparator, gcBefore);
-
-                return returnCF.isSuper() ? removeDeleted(returnCF, gcBefore) : removeDeletedCF(returnCF, gcBefore);
-            }
-            catch (Throwable e)
-            {
-                logger.error("error reading", e);
-                throw new RuntimeException(e);
-            }
-            finally
-            {
-                /* close all cursors */
-                for (IColumnIterator ci : iterators)
-                {
-                    FileUtils.closeQuietly(ci);
-                }
-            }
+            SSTCacheCollationController collationController = new SSTCacheCollationController(this, data.getView(), new CachedDataInput(buffer), filter, gcBefore);
+            return collationController.getColumns();
         }
 
     }

@@ -45,14 +45,25 @@ public class CachedDataInput extends AbstractDataInput implements FileDataInput
 
     private ByteBuffer buffer;
     private int position;
+    private long maxTimestamp;
 
     public static ByteBuffer serialize(ColumnFamily cf) {
         ByteArrayOutputStream baos = BAOS.get();
         baos.reset();
         DataOutput dos = new DataOutputStream(baos);
+        // serialize max timestamp
+        serializeMaxTimestamp(cf, dos);
         serializeIndex(cf, dos);
         ColumnFamily.serializer().serializeForSSTable(cf, dos);
         return ByteBuffer.wrap(baos.toByteArray());
+    }
+
+    private static void serializeMaxTimestamp(ColumnFamily cf, DataOutput dos) {
+        try {
+            dos.writeLong(cf.maxTimestamp());
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
 
@@ -122,7 +133,8 @@ public class CachedDataInput extends AbstractDataInput implements FileDataInput
     {
         assert buffer != null;
         this.buffer = buffer;
-        position = 0;
+        this.maxTimestamp = buffer.getLong(0);
+        position = 8;
     }
 
     // don't make this public, this is only for seeking WITHIN the current mapped segment
@@ -225,6 +237,10 @@ public class CachedDataInput extends AbstractDataInput implements FileDataInput
         assert ((long)oldPosition) + n <= Integer.MAX_VALUE;
         position = Math.min(buffer.capacity(), position + n);
         return position - oldPosition;
+    }
+
+    public long getMaxTimestamp() {
+        return maxTimestamp;
     }
 
     private static class CachedDataInputMark implements FileMark
