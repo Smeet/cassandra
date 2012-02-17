@@ -54,10 +54,10 @@ public class DataInputSliceIterator extends AbstractIterator<IColumn> implements
     private final ByteBuffer startColumn;
     private final ByteBuffer finishColumn;
     private final boolean reversed;
+    private final AbstractType comparator;
 
     private BlockFetcher fetcher;
     private Deque<IColumn> blockColumns = new ArrayDeque<IColumn>();
-    private AbstractType comparator;
 
     public DataInputSliceIterator(CFMetaData metadata, FileDataInput input, DecoratedKey key, ByteBuffer startColumn, ByteBuffer finishColumn, boolean reversed)
     {

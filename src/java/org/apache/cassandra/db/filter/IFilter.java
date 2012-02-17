@@ -61,7 +61,7 @@ public interface IFilter
     /**
      * returns an iterator that returns columns for the given file data input. 
      */
-    public abstract IColumnIterator getDataInputIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key);
+    public abstract IColumnIterator getDataInputIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key, boolean noMergeNecessary);
 
     /**
      * returns an iterator that returns columns from the given SSTable

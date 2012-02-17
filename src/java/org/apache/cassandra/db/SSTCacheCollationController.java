@@ -19,7 +19,13 @@
  */
 package org.apache.cassandra.db;
 
+import java.nio.ByteBuffer;
+import java.util.*;
+
 import com.google.common.collect.Iterables;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.SimpleAbstractColumnIterator;
 import org.apache.cassandra.db.filter.NamesQueryFilter;
@@ -28,15 +34,6 @@ import org.apache.cassandra.db.marshal.CounterColumnType;
 import org.apache.cassandra.io.util.CachedDataInput;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.CloseableIterator;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.TreeSet;
 
 public class SSTCacheCollationController
 {
@@ -101,8 +98,9 @@ public class SSTCacheCollationController
             long currentMaxTs = dataInput.getMaxTimestamp();
             reduceNameFilter(reducedFilter, container, currentMaxTs);
             
-            if (!((NamesQueryFilter) reducedFilter.filter).columns.isEmpty()) {
-                IColumnIterator iter = reducedFilter.getDataInputIterator(cfs.metadata, dataInput);
+            if (!((NamesQueryFilter) reducedFilter.filter).columns.isEmpty()) 
+            {
+                IColumnIterator iter = reducedFilter.getDataInputIterator(cfs.metadata, dataInput, iterators.isEmpty());
                 if (iter.getColumnFamily() != null)
                 {
                     iterators.add(iter);
@@ -197,7 +195,7 @@ public class SSTCacheCollationController
             }
 
             /* add the cached merged row*/
-            IColumnIterator iter = filter.getDataInputIterator(cfs.metadata, dataInput);
+            IColumnIterator iter = filter.getDataInputIterator(cfs.metadata, dataInput, iterators.isEmpty());
             if (iter.getColumnFamily() != null)
             {
                 iterators.add(iter);

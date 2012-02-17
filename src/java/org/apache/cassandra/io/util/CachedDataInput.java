@@ -20,11 +20,6 @@
  */
 package org.apache.cassandra.io.util;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.IColumn;
-import org.apache.cassandra.io.sstable.IndexHelper;
-
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutput;
 import java.io.DataOutputStream;
@@ -32,6 +27,11 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.io.sstable.IndexHelper;
 
 public class CachedDataInput extends AbstractDataInput implements FileDataInput
 {
@@ -251,6 +251,10 @@ public class CachedDataInput extends AbstractDataInput implements FileDataInput
         {
             this.position = position;
         }
+    }
+
+    public ByteBuffer getBuffer() {
+        return buffer;
     }
 
     @Override

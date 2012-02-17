@@ -18,21 +18,30 @@
 
 package org.apache.cassandra.db;
 
+import java.io.File;
+import java.io.FileFilter;
+import java.io.IOError;
+import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
+import javax.management.*;
+
 import com.google.common.collect.Iterables;
-import org.apache.cassandra.cache.AutoSavingCache;
-import org.apache.cassandra.cache.AutoSavingKeyCache;
-import org.apache.cassandra.cache.AutoSavingRowCache;
-import org.apache.cassandra.cache.AutoSavingSSTCache;
-import org.apache.cassandra.cache.ConcurrentLinkedHashCache;
-import org.apache.cassandra.cache.ICache;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.cache.*;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.config.ConfigurationException;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
@@ -46,71 +55,17 @@ import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.dht.AbstractBounds;
-import org.apache.cassandra.dht.Bounds;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.dht.LocalPartitioner;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.dht.*;
+import org.apache.cassandra.io.sstable.*;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTable;
-import org.apache.cassandra.io.sstable.SSTableMetadata;
-import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.io.util.CachedDataInput;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.IndexClause;
-import org.apache.cassandra.utils.Allocator;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.CLibrary;
-import org.apache.cassandra.utils.CloseableIterator;
-import org.apache.cassandra.utils.DefaultInteger;
-import org.apache.cassandra.utils.EstimatedHistogram;
-import org.apache.cassandra.utils.HeapAllocator;
+import org.apache.cassandra.utils.*;
 import org.apache.cassandra.utils.IntervalTree.Interval;
-import org.apache.cassandra.utils.LatencyTracker;
-import org.apache.cassandra.utils.NodeId;
-import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.WrappedRunnable;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.management.InstanceNotFoundException;
-import javax.management.MBeanRegistrationException;
-import javax.management.MBeanServer;
-import javax.management.MalformedObjectNameException;
-import javax.management.ObjectName;
-import java.io.File;
-import java.io.FileFilter;
-import java.io.IOError;
-import java.io.IOException;
-import java.lang.management.ManagementFactory;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.regex.Pattern;
 
 public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 {
@@ -1093,7 +1048,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 }
 
                 FileDataInput mergedRow = new CachedDataInput(cachedRow);
-                iter = filter.getDataInputIterator(metadata, mergedRow);
+                iter = filter.getDataInputIterator(metadata, mergedRow, iterators.isEmpty());
                 if (iter.getColumnFamily() != null)
                 {
                     returnCF.delete(iter.getColumnFamily());
@@ -1325,11 +1280,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         DecoratedKey key = filter.key;
         ByteBuffer buffer = sstCache.get(key);
         if (buffer == null)
-        {                                                                                                                        
+        {                                    
             // for cache = false: we dont cache the cf itself
             ColumnFamily cf = getTopLevelColumns(QueryFilter.getIdentityFilter(key, new QueryPath(columnFamily)), gcBefore, false);
             if (cf != null) {
-                buffer = CachedDataInput.serialize(cf);
+                if (CFMetaData.USE_SSTABLE_CACHE_V2) {
+                    buffer = CacheRowSerializer.serialize(cf);
+                } else {
+                    buffer = CachedDataInput.serialize(cf);
+                }
                 sstCache.put(key, buffer);
 
                 return filterColumnFamily(cf, filter, gcBefore);
@@ -1339,6 +1298,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
         else
         {
+            buffer = buffer.duplicate();
             SSTCacheCollationController collationController = new SSTCacheCollationController(this, data.getView(), new CachedDataInput(buffer), filter, gcBefore);
             return collationController.getColumns();
         }

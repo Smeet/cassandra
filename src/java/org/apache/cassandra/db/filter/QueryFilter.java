@@ -95,10 +95,10 @@ public class QueryFilter
         return superFilter.getSSTableColumnIterator(sstable, file, key);
     }
 
-    public IColumnIterator getDataInputIterator(CFMetaData metaData, FileDataInput mergedRow) {
+    public IColumnIterator getDataInputIterator(CFMetaData metaData, FileDataInput mergedRow, boolean noMergeNecessary) {
         if (path.superColumnName == null)
-            return filter.getDataInputIterator(metaData, mergedRow, key);
-        return superFilter.getDataInputIterator(metaData, mergedRow, key);
+            return filter.getDataInputIterator(metaData, mergedRow, key, noMergeNecessary);
+        return superFilter.getDataInputIterator(metaData, mergedRow, key, noMergeNecessary);
     }
 
     // TODO move gcBefore into a field
