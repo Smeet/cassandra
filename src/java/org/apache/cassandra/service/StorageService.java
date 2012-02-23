@@ -854,7 +854,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public Map<Token, String> getTokenToEndpointMap()
     {
-        Map<Token, InetAddress> mapInetAddress = tokenMetadata_.getTokenToEndpointMap();
+        Map<Token, InetAddress> mapInetAddress = tokenMetadata_.getNormalAndBootstrappingTokenToEndpointMap();
         Map<Token, String> mapString = new HashMap<Token, String>(mapInetAddress.size());
         for (Map.Entry<Token, InetAddress> entry : mapInetAddress.entrySet())
         {
@@ -1252,14 +1252,17 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         // For each of the bootstrapping nodes, simply add and remove them one by one to
         // allLeftMetadata and check in between what their ranges would be.
-        for (Map.Entry<Token, InetAddress> entry : bootstrapTokens.entrySet())
+        synchronized (bootstrapTokens)
         {
-            InetAddress endpoint = entry.getValue();
+            for (Map.Entry<Token, InetAddress> entry : bootstrapTokens.entrySet())
+            {
+                InetAddress endpoint = entry.getValue();
 
-            allLeftMetadata.updateNormalToken(entry.getKey(), endpoint);
-            for (Range range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
-                pendingRanges.put(range, endpoint);
-            allLeftMetadata.removeEndpoint(endpoint);
+                allLeftMetadata.updateNormalToken(entry.getKey(), endpoint);
+                for (Range range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
+                    pendingRanges.put(range, endpoint);
+                allLeftMetadata.removeEndpoint(endpoint);
+            }
         }
 
         // At this stage pendingRanges has been updated according to leaving and bootstrapping nodes.
@@ -2071,7 +2074,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (token instanceof StringToken)
         {
             token = new StringToken(((String)token.token).replaceAll(VersionedValue.DELIMITER_STR, ""));
-            if (tokenMetadata_.getTokenToEndpointMap().containsKey(token))
+            if (tokenMetadata_.getNormalAndBootstrappingTokenToEndpointMap().containsKey(token))
                 throw new RuntimeException("Unable to compute unique token for new node -- specify one manually with initial_token");
         }
         return token;
@@ -2339,10 +2342,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.warn("Removal not confirmed for for " + StringUtils.join(this.replicatingNodes, ","));
             for (InetAddress endpoint : tokenMetadata_.getLeavingEndpoints())
             {
-                Gossiper.instance.advertiseTokenRemoved(endpoint, tokenMetadata_.getToken(endpoint));
-                tokenMetadata_.removeEndpoint(endpoint);
+                Token token = tokenMetadata_.getToken(endpoint);
+                Gossiper.instance.advertiseTokenRemoved(endpoint, token);
+                excise(token, endpoint);
             }
             replicatingNodes.clear();
+            removingNode = null;
         }
         else
         {

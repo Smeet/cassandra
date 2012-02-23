@@ -1,4 +1,10 @@
 1.0.8
+ * fix race between cleanup and flush on secondary index CFSes (CASSANDRA-3712)
+ * avoid including non-queried nodes in rangeslice read repair
+   (CASSANDRA-3843)
+ * Only snapshot CF being compacted for snapshot_before_compaction 
+   (CASSANDRA-3803)
+ * Log active compactions in StatusLogger (CASSANDRA-3703)
  * Compute more accurate compaction score per level (CASSANDRA-3790)
  * Return InvalidRequest when using a keyspace that doesn't exist
    (CASSANDRA-3764)
@@ -7,6 +13,35 @@
  * (cqlsh) add DESCRIBE COLUMNFAMILIES (CASSANDRA-3586)
  * (cqlsh) format blobs correctly and use colors to improve output
    readability (CASSANDRA-3726)
+ * synchronize BiMap of bootstrapping tokens (CASSANDRA-3417)
+ * show index options in CLI (CASSANDRA-3809)
+ * add optional socket timeout for streaming (CASSANDRA-3838)
+ * fix truncate not to leave behind non-CFS backed secondary indexes
+   (CASSANDRA-3844)
+ * make CLI `show schema` to use output stream directly instead
+   of StringBuilder (CASSANDRA-3842)
+ * remove the wait on hint future during write (CASSANDRA-3870)
+ * (cqlsh) ignore missing CfDef opts (CASSANDRA-3933)
+ * (cqlsh) look for cqlshlib relative to realpath (CASSANDRA-3767)
+ * Fix short read protection (CASSANDRA-3934)
+ * Make sure infered and actual schema match (CASSANDRA-3371)
+ * Fix NPE during HH delivery (CASSANDRA-3677)
+ * Don't put boostrapping node in 'hibernate' status (CASSANDRA-3737)
+ * Fix double quotes in windows bat files (CASSANDRA-3744)
+ * Fix bad validator lookup (CASSANDRA-3789)
+ * Fix soft reset in EC2MultiRegionSnitch (CASSANDRA-3835)
+ * Don't leave zombie connections with THSHA thrift server (CASSANDRA-3867)
+ * (cqlsh) fix deserialization of data (CASSANDRA-3874)
+ * Fix removetoken force causing an inconsistent state (CASSANDRA-3876)
+ * Fix ahndling of some types with Pig (CASSANDRA-3886)
+ * Don't allow to drop the system keyspace (CASSANDRA-3759)
+ * Make Pig deletes disabled by default and configurable (CASSANDRA-3628)
+Merged from 0.8:
+ * (Pig) fix CassandraStorage to use correct comparator in Super ColumnFamily
+   case (CASSANDRA-3251)
+ * fix thread safety issues in commitlog replay, primarily affecting
+   systems with many (100s) of CF definitions (CASSANDRA-3751)
+ * Fix relevant tomstone ignored with super columns (CASSANDRA-3875)
 
 
 1.0.7
@@ -155,7 +190,6 @@ Merged from 0.8:
  * cleanup usage of StorageService.setMode() (CASANDRA-3388)
  * Add timing information to cassandra-cli GET/SET/LIST queries (CASSANDRA-3326)
  * Only create one CompressionMetadata object per sstable (CASSANDRA-3427)
- * synchronize BiMap of bootstrapping tokens (CASSANDRA-3417)
  * Avoid large array allocation for compressed chunk offsets (CASSANDRA-3432)
  * fix DecimalType bytebuffer marshalling (CASSANDRA-3421)
  * fix bug that caused first column in per row indexes to be ignored 

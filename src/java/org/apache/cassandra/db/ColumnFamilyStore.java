@@ -677,7 +677,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
          * all ongoing updates to memtables have completed. We can get the tail
          * of the log and use it as the starting position for log replay on recovery.
          *
-         * This is why we Table.flusherLock needs to be global instead of per-Table:
+         * This is why we Table.switchLock needs to be global instead of per-Table:
          * we need to schedule discardCompletedSegments calls in the same order as their
          * contexts (commitlog position) were read, even though the flush executor
          * is multithreaded.
@@ -1223,7 +1223,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return cached;
     }
 
-    private ColumnFamily getColumnFamily(QueryFilter filter, int gcBefore)
+    ColumnFamily getColumnFamily(QueryFilter filter, int gcBefore)
     {
         assert columnFamily.equals(filter.getColumnFamilyName()) : filter.getColumnFamilyName();
 
@@ -1476,7 +1476,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return metadata.comparator;
     }
 
-    private void snapshotWithoutFlush(String snapshotName)
+    public void snapshotWithoutFlush(String snapshotName)
     {
         for (ColumnFamilyStore cfs : concatWithIndexes())
         {
@@ -2026,5 +2026,25 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     {
         DataTracker.View view = data.getView();
         return view.sstables.isEmpty() && view.memtable.getOperations() == 0 && view.memtablesPendingFlush.isEmpty();
+    }
+
+    /**
+     * Discard all SSTables that were created before given timestamp. Caller is responsible to obtain compactionLock.
+     *
+     * @param truncatedAt The timestamp of the truncation
+     *                    (all SSTables before that timestamp are going be marked as compacted)
+     */
+    public void discardSSTables(long truncatedAt)
+    {
+        List<SSTableReader> truncatedSSTables = new ArrayList<SSTableReader>();
+
+        for (SSTableReader sstable : getSSTables())
+        {
+            if (!sstable.newSince(truncatedAt))
+                truncatedSSTables.add(sstable);
+        }
+
+        if (!truncatedSSTables.isEmpty())
+            markCompacted(truncatedSSTables);
     }
 }

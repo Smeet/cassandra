@@ -26,6 +26,7 @@ import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.IntegerType;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.thrift.*;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Hex;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.commons.logging.Log;
@@ -33,7 +34,6 @@ import org.apache.commons.logging.LogFactory;
 
 import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.IColumn;
-import org.apache.cassandra.db.SuperColumn;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.hadoop.*;
 import org.apache.cassandra.thrift.Mutation;
@@ -50,15 +50,10 @@ import org.apache.pig.backend.executionengine.ExecException;
 import org.apache.pig.backend.hadoop.executionengine.mapReduceLayer.PigSplit;
 import org.apache.pig.data.*;
 import org.apache.pig.ResourceSchema.ResourceFieldSchema;
-import org.apache.pig.impl.logicalLayer.FrontendException;
 import org.apache.pig.impl.util.UDFContext;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
-import org.apache.thrift.transport.TFramedTransport;
-import org.apache.thrift.transport.TSocket;
-import org.apache.thrift.transport.TTransport;
-import org.apache.thrift.transport.TTransportException;
 
 /**
  * A LoadStoreFunc for retrieving data from and storing data to Cassandra
@@ -72,6 +67,7 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
     public final static String PIG_RPC_PORT = "PIG_RPC_PORT";
     public final static String PIG_INITIAL_ADDRESS = "PIG_INITIAL_ADDRESS";
     public final static String PIG_PARTITIONER = "PIG_PARTITIONER";
+    public final static String PIG_ALLOW_DELETES = "PIG_ALLOW_DELETES";
 
     private final static ByteBuffer BOUND = ByteBufferUtil.EMPTY_BYTE_BUFFER;
     private static final Log logger = LogFactory.getLog(CassandraStorage.class);
@@ -79,14 +75,15 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
     private ByteBuffer slice_start = BOUND;
     private ByteBuffer slice_end = BOUND;
     private boolean slice_reverse = false;
+    private boolean allow_deletes = false;
     private String keyspace;
     private String column_family;
     private String loadSignature;
     private String storeSignature;
 
     private Configuration conf;
-    private RecordReader reader;
-    private RecordWriter writer;
+    private RecordReader<ByteBuffer, Map<ByteBuffer, IColumn>> reader;
+    private RecordWriter<ByteBuffer, List<Mutation>> writer;
     private int limit;
 
     public CassandraStorage()
@@ -118,20 +115,37 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
                 return null;
 
             CfDef cfDef = getCfDef(loadSignature);
-            ByteBuffer key = (ByteBuffer)reader.getCurrentKey();
-            SortedMap<ByteBuffer,IColumn> cf = (SortedMap<ByteBuffer,IColumn>)reader.getCurrentValue();
+            ByteBuffer key = reader.getCurrentKey();
+            Map<ByteBuffer, IColumn> cf = reader.getCurrentValue();
             assert key != null && cf != null;
-            
-            // and wrap it in a tuple
-            Tuple tuple = TupleFactory.getInstance().newTuple(2);
-            ArrayList<Tuple> columns = new ArrayList<Tuple>();
-            tuple.set(0, new DataByteArray(key.array(), key.position()+key.arrayOffset(), key.limit()+key.arrayOffset()));
+
+            // output tuple, will hold the key, each indexed column in a tuple, then a bag of the rest
+            Tuple tuple = TupleFactory.getInstance().newTuple();
+            DefaultDataBag bag = new DefaultDataBag();
+            // set the key
+            tuple.append(new DataByteArray(ByteBufferUtil.getArray(key)));
+            // we must add all the indexed columns first to match the schema
+            Map<ByteBuffer, Boolean> added = new HashMap<ByteBuffer, Boolean>();
+            // take care to iterate these in the same order as the schema does
+            for (ColumnDef cdef : cfDef.column_metadata)
+            {
+                if (cf.containsKey(cdef.name))
+                {
+                    tuple.append(columnToTuple(cf.get(cdef.name), cfDef, parseType(cfDef.getComparator_type())));
+                }
+                else
+                {   // otherwise, we need to add an empty tuple to take its place
+                    tuple.append(TupleFactory.getInstance().newTuple());
+                }
+                added.put(cdef.name, true);
+            }
+            // now add all the other columns
             for (Map.Entry<ByteBuffer, IColumn> entry : cf.entrySet())
             {
-                columns.add(columnToTuple(entry.getKey(), entry.getValue(), cfDef));
+                if (!added.containsKey(entry.getKey()))
+                    bag.add(columnToTuple(entry.getValue(), cfDef, parseType(cfDef.getComparator_type())));
             }
-
-            tuple.set(1, new DefaultDataBag(columns));
+            tuple.append(bag);
             return tuple;
         }
         catch (InterruptedException e)
@@ -140,29 +154,31 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
         }
     }
 
-    private Tuple columnToTuple(ByteBuffer name, IColumn col, CfDef cfDef) throws IOException
+    private Tuple columnToTuple(IColumn col, CfDef cfDef, AbstractType comparator) throws IOException
     {
         Tuple pair = TupleFactory.getInstance().newTuple(2);
         List<AbstractType> marshallers = getDefaultMarshallers(cfDef);
         Map<ByteBuffer,AbstractType> validators = getValidatorMap(cfDef);
 
-        setTupleValue(pair, 0, marshallers.get(0).compose(name));
+        setTupleValue(pair, 0, comparator.compose(col.name()));
         if (col instanceof Column)
         {
             // standard
-            if (validators.get(name) == null)
+            if (validators.get(col.name()) == null)
                 setTupleValue(pair, 1, marshallers.get(1).compose(col.value()));
             else
-                setTupleValue(pair, 1, validators.get(name).compose(col.value()));
+                setTupleValue(pair, 1, validators.get(col.name()).compose(col.value()));
             return pair;
         }
+        else
+        {
+            // super
+            ArrayList<Tuple> subcols = new ArrayList<Tuple>();
+            for (IColumn subcol : col.getSubColumns())
+                subcols.add(columnToTuple(subcol, cfDef, parseType(cfDef.getSubcomparator_type())));
 
-        // super
-        ArrayList<Tuple> subcols = new ArrayList<Tuple>();
-        for (IColumn subcol : col.getSubColumns())
-            subcols.add(columnToTuple(subcol.name(), subcol, cfDef));
-        
-        pair.set(1, new DefaultDataBag(subcols));
+            pair.set(1, new DefaultDataBag(subcols));
+        }
         return pair;
     }
 
@@ -188,12 +204,14 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
     private List<AbstractType> getDefaultMarshallers(CfDef cfDef) throws IOException
     {
         ArrayList<AbstractType> marshallers = new ArrayList<AbstractType>();
-        AbstractType comparator = null;
-        AbstractType default_validator = null;
-        AbstractType key_validator = null;
+        AbstractType comparator;
+        AbstractType subcomparator;
+        AbstractType default_validator;
+        AbstractType key_validator;
         try
         {
             comparator = TypeParser.parse(cfDef.getComparator_type());
+            subcomparator = TypeParser.parse(cfDef.getSubcomparator_type());
             default_validator = TypeParser.parse(cfDef.getDefault_validation_class());
             key_validator = TypeParser.parse(cfDef.getKey_validation_class());
         }
@@ -205,6 +223,7 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
         marshallers.add(comparator);
         marshallers.add(default_validator);
         marshallers.add(key_validator);
+        marshallers.add(subcomparator);
         return marshallers;
     }
 
@@ -228,6 +247,18 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
             }
         }
         return validators;
+    }
+
+    private AbstractType parseType(String type) throws IOException
+    {
+        try
+        {
+            return TypeParser.parse(type);
+        }
+        catch (ConfigurationException e)
+        {
+            throw new IOException(e);
+        }
     }
 
     @Override
@@ -302,6 +333,8 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
             ConfigHelper.setPartitioner(conf, System.getenv(PIG_PARTITIONER));
         else if (ConfigHelper.getPartitioner(conf) == null) 
             throw new IOException("PIG_PARTITIONER environment variable not set");
+        if (System.getenv(PIG_ALLOW_DELETES) != null)
+            allow_deletes = Boolean.valueOf(System.getenv(PIG_ALLOW_DELETES));
     }
 
     @Override
@@ -317,6 +350,8 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
         }
         ConfigHelper.setInputColumnFamily(conf, keyspace, column_family);
         setConnectionInformation();
+        if (loadSignature == null)
+            loadSignature = location;
         initSchema(loadSignature);
     }
 
@@ -327,6 +362,13 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
 
         if (cfDef.column_type.equals("Super"))
             return null;
+        /*
+        Our returned schema should look like this:
+        (key, index1:(name, value), index2:(name, value), columns:{(name, value)})
+        Which is to say, columns that have metadata will be returned as named tuples, but unknown columns will go into a bag.
+        This way, wide rows can still be handled by the bag, but known columns can easily be referenced.
+         */
+
         // top-level schema, no type
         ResourceSchema schema = new ResourceSchema();
 
@@ -339,54 +381,59 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
         keyFieldSchema.setName("key");
         keyFieldSchema.setType(getPigType(marshallers.get(2)));
 
-        // will become the bag of tuples
-        ResourceFieldSchema bagFieldSchema = new ResourceFieldSchema();
-        bagFieldSchema.setName("columns");
-        bagFieldSchema.setType(DataType.BAG);
         ResourceSchema bagSchema = new ResourceSchema();
+        ResourceFieldSchema bagField = new ResourceFieldSchema();
+        bagField.setType(DataType.BAG);
+        bagField.setName("columns");
+        // inside the bag, place one tuple with the default comparator/validator schema
+        ResourceSchema bagTupleSchema = new ResourceSchema();
+        ResourceFieldSchema bagTupleField = new ResourceFieldSchema();
+        bagTupleField.setType(DataType.TUPLE);
+        ResourceFieldSchema bagcolSchema = new ResourceFieldSchema();
+        ResourceFieldSchema bagvalSchema = new ResourceFieldSchema();
+        bagcolSchema.setName("name");
+        bagvalSchema.setName("value");
+        bagcolSchema.setType(getPigType(marshallers.get(0)));
+        bagvalSchema.setType(getPigType(marshallers.get(1)));
+        bagTupleSchema.setFields(new ResourceFieldSchema[] { bagcolSchema, bagvalSchema });
+        bagTupleField.setSchema(bagTupleSchema);
+        bagSchema.setFields(new ResourceFieldSchema[] { bagTupleField });
+        bagField.setSchema(bagSchema);
 
-        List<ResourceFieldSchema> tupleFields = new ArrayList<ResourceFieldSchema>();
-
-        // default comparator/validator
-        ResourceSchema innerTupleSchema = new ResourceSchema();
-        ResourceFieldSchema tupleField = new ResourceFieldSchema();
-        tupleField.setType(DataType.TUPLE);
-        tupleField.setSchema(innerTupleSchema);
-
-        ResourceFieldSchema colSchema = new ResourceFieldSchema();
-        colSchema.setName("name");
-        colSchema.setType(getPigType(marshallers.get(0)));
-        tupleFields.add(colSchema);
-
-        ResourceFieldSchema valSchema = new ResourceFieldSchema();
-        AbstractType validator = marshallers.get(1);
-        valSchema.setName("value");
-        valSchema.setType(getPigType(validator));
-        tupleFields.add(valSchema);
+        // will contain all fields for this schema
+        List<ResourceFieldSchema> allSchemaFields = new ArrayList<ResourceFieldSchema>();
+        // add the key first, then the indexed columns, and finally the bag
+        allSchemaFields.add(keyFieldSchema);
 
         // defined validators/indexes
         for (ColumnDef cdef : cfDef.column_metadata)
         {
-            colSchema = new ResourceFieldSchema();
-            colSchema.setName(new String(cdef.getName()));
-            colSchema.setType(getPigType(marshallers.get(0)));
-            tupleFields.add(colSchema);
+            // make a new tuple for each col/val pair
+            ResourceSchema innerTupleSchema = new ResourceSchema();
+            ResourceFieldSchema innerTupleField = new ResourceFieldSchema();
+            innerTupleField.setType(DataType.TUPLE);
+            innerTupleField.setSchema(innerTupleSchema);
+            innerTupleField.setName(new String(cdef.getName()));
 
-            valSchema = new ResourceFieldSchema();
-            validator = validators.get(ByteBuffer.wrap(cdef.getName()));
+            ResourceFieldSchema idxColSchema = new ResourceFieldSchema();
+            idxColSchema.setName("name");
+            idxColSchema.setType(getPigType(marshallers.get(0)));
+
+            ResourceFieldSchema valSchema = new ResourceFieldSchema();
+            AbstractType validator = validators.get(cdef.name);
             if (validator == null)
                 validator = marshallers.get(1);
             valSchema.setName("value");
             valSchema.setType(getPigType(validator));
-            tupleFields.add(valSchema);
-        }
-        innerTupleSchema.setFields(tupleFields.toArray(new ResourceFieldSchema[tupleFields.size()]));
 
-        // a bag can contain only one tuple, but that tuple can contain anything
-        bagSchema.setFields(new ResourceFieldSchema[] { tupleField });
-        bagFieldSchema.setSchema(bagSchema);
+            innerTupleSchema.setFields(new ResourceFieldSchema[] { idxColSchema, valSchema });
+            allSchemaFields.add(innerTupleField);
+        }
+        // bag at the end for unknown columns
+        allSchemaFields.add(bagField);
+
         // top level schema contains everything
-        schema.setFields(new ResourceFieldSchema[] { keyFieldSchema, bagFieldSchema });
+        schema.setFields(allSchemaFields.toArray(new ResourceFieldSchema[allSchemaFields.size()]));
         return schema;
     }
 
@@ -474,80 +521,157 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
         if (o == null)
             return (ByteBuffer)o;
         if (o instanceof java.lang.String)
-            o = new DataByteArray((String)o);
+            return ByteBuffer.wrap(new DataByteArray((String)o).get());
+        if (o instanceof Integer)
+            return Int32Type.instance.decompose((Integer)o);
+        if (o instanceof Long)
+            return LongType.instance.decompose((Long)o);
+        if (o instanceof Float)
+            return FloatType.instance.decompose((Float)o);
+        if (o instanceof Double)
+            return DoubleType.instance.decompose((Double)o);
+        if (o instanceof UUID)
+            return ByteBuffer.wrap(UUIDGen.decompose((UUID) o));
+
         return ByteBuffer.wrap(((DataByteArray) o).get());
     }
 
-    public void putNext(Tuple t) throws ExecException, IOException
+    public void putNext(Tuple t) throws IOException
     {
-        ByteBuffer key = objToBB(t.get(0));
-        DefaultDataBag pairs = (DefaultDataBag) t.get(1);
-        ArrayList<Mutation> mutationList = new ArrayList<Mutation>();
-        CfDef cfDef = getCfDef(storeSignature);
-        try
+        /*
+        We support two cases for output:
+        First, the original output:
+            (key, (name, value), (name,value), {(name,value)}) (tuples or bag is optional)
+        For supers, we only accept the original output.
+        */
+
+        if (t.size() < 1)
         {
-            for (Tuple pair : pairs)
+            // simply nothing here, we can't even delete without a key
+            logger.warn("Empty output skipped, filter empty tuples to suppress this warning");
+            return;
+        }
+        ByteBuffer key = objToBB(t.get(0));
+        if (t.getType(1) == DataType.TUPLE)
+            writeColumnsFromTuple(key, t, 1);
+        else if (t.getType(1) == DataType.BAG)
+        {
+            if (t.size() > 2)
+                throw new IOException("No arguments allowed after bag");
+            writeColumnsFromBag(key, (DefaultDataBag) t.get(1));
+        }
+        else
+            throw new IOException("Second argument in output must be a tuple or bag");
+    }
+
+    private void writeColumnsFromTuple(ByteBuffer key, Tuple t, int offset) throws IOException
+    {
+        ArrayList<Mutation> mutationList = new ArrayList<Mutation>();
+        for (int i = offset; i < t.size(); i++)
+        {
+            if (t.getType(i) == DataType.BAG)
+                writeColumnsFromBag(key, (DefaultDataBag) t.get(i));
+            else if (t.getType(i) == DataType.TUPLE)
             {
-               Mutation mutation = new Mutation();
-               if (DataType.findType(pair.get(1)) == DataType.BAG) // supercolumn
-               {
-                   org.apache.cassandra.thrift.SuperColumn sc = new org.apache.cassandra.thrift.SuperColumn();
-                   sc.name = objToBB(pair.get(0));
-                   ArrayList<org.apache.cassandra.thrift.Column> columns = new ArrayList<org.apache.cassandra.thrift.Column>();
-                   for (Tuple subcol : (DefaultDataBag) pair.get(1))
-                   {
-                       org.apache.cassandra.thrift.Column column = new org.apache.cassandra.thrift.Column();
-                       column.name = objToBB(subcol.get(0));
-                       column.value = objToBB(subcol.get(1));
-                       column.setTimestamp(System.currentTimeMillis() * 1000);
-                       columns.add(column);
-                   }
-                   if (columns.isEmpty()) // a deletion
-                   {
-                       mutation.deletion = new Deletion();
-                       mutation.deletion.super_column = objToBB(pair.get(0));
-                       mutation.deletion.setTimestamp(System.currentTimeMillis() * 1000);
-                   }
-                   else
-                   {
-                       sc.columns = columns;
-                       mutation.column_or_supercolumn = new ColumnOrSuperColumn();
-                       mutation.column_or_supercolumn.super_column = sc;
-                   }
-               }
-               else // assume column since it couldn't be anything else
-               {
-                   if (pair.get(1) == null)
-                   {
-                       mutation.deletion = new Deletion();
-                       mutation.deletion.predicate = new org.apache.cassandra.thrift.SlicePredicate();
-                       mutation.deletion.predicate.column_names = Arrays.asList(objToBB(pair.get(0)));
-                       mutation.deletion.setTimestamp(System.currentTimeMillis() * 1000);
-                   }
-                   else
-                   {
-                       org.apache.cassandra.thrift.Column column = new org.apache.cassandra.thrift.Column();
-                       column.name = objToBB(pair.get(0));
-                       column.value = objToBB(pair.get(1));
-                       column.setTimestamp(System.currentTimeMillis() * 1000);
-                       mutation.column_or_supercolumn = new ColumnOrSuperColumn();
-                       mutation.column_or_supercolumn.column = column;
-                   }
-               }
-               mutationList.add(mutation);
+                Tuple inner = (Tuple) t.get(i);
+                if (inner.size() > 0) // may be empty, for an indexed column that wasn't present
+                    mutationList.add(mutationFromTuple(inner));
+            }
+            else
+                throw new IOException("Output type was not a bag or a tuple");
+        }
+        if (mutationList.size() > 0)
+            writeMutations(key, mutationList);
+    }
+
+    private Mutation mutationFromTuple(Tuple t) throws IOException
+    {
+        Mutation mutation = new Mutation();
+        if (t.get(1) == null)
+        {
+            if (allow_deletes)
+            {
+                mutation.deletion = new Deletion();
+                mutation.deletion.predicate = new org.apache.cassandra.thrift.SlicePredicate();
+                mutation.deletion.predicate.column_names = Arrays.asList(objToBB(t.get(0)));
+                mutation.deletion.setTimestamp(FBUtilities.timestampMicros());
+            }
+            else
+                throw new IOException("null found but deletes are disabled, set " + PIG_ALLOW_DELETES + "=true to enable");
+        }
+        else
+        {
+            org.apache.cassandra.thrift.Column column = new org.apache.cassandra.thrift.Column();
+            column.setName(objToBB(t.get(0)));
+            column.setValue(objToBB(t.get(1)));
+            column.setTimestamp(FBUtilities.timestampMicros());
+            mutation.column_or_supercolumn = new ColumnOrSuperColumn();
+            mutation.column_or_supercolumn.column = column;
+        }
+        return mutation;
+    }
+
+    private void writeColumnsFromBag(ByteBuffer key, DefaultDataBag bag) throws IOException
+    {
+        List<Mutation> mutationList = new ArrayList<Mutation>();
+        for (Tuple pair : bag)
+        {
+            Mutation mutation = new Mutation();
+            if (DataType.findType(pair.get(1)) == DataType.BAG) // supercolumn
+            {
+                SuperColumn sc = new SuperColumn();
+                sc.setName(objToBB(pair.get(0)));
+                List<org.apache.cassandra.thrift.Column> columns = new ArrayList<org.apache.cassandra.thrift.Column>();
+                for (Tuple subcol : (DefaultDataBag) pair.get(1))
+                {
+                    org.apache.cassandra.thrift.Column column = new org.apache.cassandra.thrift.Column();
+                    column.setName(objToBB(subcol.get(0)));
+                    column.setValue(objToBB(subcol.get(1)));
+                    column.setTimestamp(FBUtilities.timestampMicros());
+                    columns.add(column);
+                }
+                if (columns.isEmpty())
+                {
+                    if (allow_deletes)
+                    {
+                        mutation.deletion = new Deletion();
+                        mutation.deletion.super_column = objToBB(pair.get(0));
+                        mutation.deletion.setTimestamp(FBUtilities.timestampMicros());
+                    }
+                    else
+                        throw new IOException("SuperColumn deletion attempted with empty bag, but deletes are disabled, set " + PIG_ALLOW_DELETES + "=true to enable");
+                }
+                else
+                {
+                    sc.columns = columns;
+                    mutation.column_or_supercolumn = new ColumnOrSuperColumn();
+                    mutation.column_or_supercolumn.super_column = sc;
+                }
+            }
+            else
+                mutation = mutationFromTuple(pair);
+            mutationList.add(mutation);
+            // for wide rows, we need to limit the amount of mutations we write at once
+            if (mutationList.size() >= 10) // arbitrary, CFOF will re-batch this up, and BOF won't care
+            {
+                writeMutations(key, mutationList);
+                mutationList.clear();
             }
         }
-        catch (ClassCastException e)
-        {
-            throw new IOException(e + " Output must be (key, {(column,value)...}) for ColumnFamily or (key, {supercolumn:{(column,value)...}...}) for SuperColumnFamily", e);
-        }
+        // write the last batch
+        if (mutationList.size() > 0)
+            writeMutations(key, mutationList);
+    }
+
+    private void writeMutations(ByteBuffer key, List<Mutation> mutations) throws IOException
+    {
         try
         {
-            writer.write(key, mutationList);
+            writer.write(key, mutations);
         }
         catch (InterruptedException e)
         {
-           throw new IOException(e);
+            throw new IOException(e);
         }
     }
 
@@ -581,7 +705,10 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
                         break;
                     }
                 }
-                property.setProperty(signature, cfdefToString(cfDef));
+                if (cfDef != null)
+                    property.setProperty(signature, cfdefToString(cfDef));
+                else
+                    throw new RuntimeException("Column family '" + column_family + "' not found in keyspace '" + keyspace + "'");
             }
             catch (TException e)
             {

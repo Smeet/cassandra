@@ -37,6 +37,7 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexBuilder;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.io.sstable.*;
@@ -728,14 +729,13 @@ public class CompactionManager implements CompactionManagerMBean
                     }
                     else
                     {
-                                              
                         cfs.invalidateCachedRow(row.getKey());
-                                                
+
                         if (!indexedColumns.isEmpty() || isCommutative)
                         {
                             if (indexedColumnsInRow != null)
                                 indexedColumnsInRow.clear();
-                            
+
                             while (row.hasNext())
                             {
                                 IColumn column = row.next();
@@ -745,13 +745,24 @@ public class CompactionManager implements CompactionManagerMBean
                                 {
                                     if (indexedColumnsInRow == null)
                                         indexedColumnsInRow = new ArrayList<IColumn>();
-                                    
+
                                     indexedColumnsInRow.add(column);
                                 }
                             }
-                            
+
                             if (indexedColumnsInRow != null && !indexedColumnsInRow.isEmpty())
-                                cfs.indexManager.deleteFromIndexes(row.getKey(), indexedColumnsInRow);
+                            {
+                                // acquire memtable lock here because secondary index deletion may cause a race. See CASSANDRA-3712
+                                Table.switchLock.readLock().lock();
+                                try
+                                {
+                                    cfs.indexManager.deleteFromIndexes(row.getKey(), indexedColumnsInRow);
+                                }
+                                finally
+                                {
+                                    Table.switchLock.readLock().unlock();
+                                }
+                            }
                         }
                     }
                 }
@@ -767,7 +778,6 @@ public class CompactionManager implements CompactionManagerMBean
             finally
             {
                 scanner.close();
-                executor.finishCompaction(ci);
                 executor.finishCompaction(ci);
             }
 
@@ -786,7 +796,6 @@ public class CompactionManager implements CompactionManagerMBean
 
             // flush to ensure we don't lose the tombstones on a restart, since they are not commitlog'd         
             cfs.indexManager.flushIndexesBlocking();
-           
 
             cfs.replaceCompactedSSTables(Arrays.asList(sstable), results);
         }
@@ -928,19 +937,13 @@ public class CompactionManager implements CompactionManagerMBean
             public void runMayThrow() throws InterruptedException, IOException
             {
                 compactionLock.writeLock().lock();
+
                 try
                 {
-                    for (ColumnFamilyStore cfs : main.concatWithIndexes())
-                    {
-                        List<SSTableReader> truncatedSSTables = new ArrayList<SSTableReader>();
-                        for (SSTableReader sstable : cfs.getSSTables())
-                        {
-                            if (!sstable.newSince(truncatedAt))
-                                truncatedSSTables.add(sstable);
-                        }
-                        if (!truncatedSSTables.isEmpty())
-                            cfs.markCompacted(truncatedSSTables);
-                    }
+                    main.discardSSTables(truncatedAt);
+
+                    for (SecondaryIndex index : main.indexManager.getIndexes())
+                        index.truncate(truncatedAt);
                 }
                 finally
                 {

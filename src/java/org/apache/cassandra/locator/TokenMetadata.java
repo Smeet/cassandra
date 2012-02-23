@@ -109,9 +109,12 @@ public class TokenMetadata
     {
         int n = 0;
         Range sourceRange = getPrimaryRangeFor(getToken(source));
-        for (Token token : bootstrapTokens.keySet())
-            if (sourceRange.contains(token))
-                n++;
+        synchronized (bootstrapTokens)
+        {
+            for (Token token : bootstrapTokens.keySet())
+                if (sourceRange.contains(token))
+                    n++;
+        }
         return n;
     }
 
@@ -405,11 +408,6 @@ public class TokenMetadata
         }
     }
 
-    public Set<Map.Entry<Token,InetAddress>> entrySet()
-    {
-        return tokenToEndpointMap.entrySet();
-    }
-
     public InetAddress getEndpoint(Token token)
     {
         lock.readLock().lock();
@@ -606,14 +604,17 @@ public class TokenMetadata
                 }
             }
 
-            if (!bootstrapTokens.isEmpty())
+            synchronized (bootstrapTokens)
             {
-                sb.append("Bootstrapping Tokens:" );
-                sb.append(System.getProperty("line.separator"));
-                for (Map.Entry<Token, InetAddress> entry : bootstrapTokens.entrySet())
+                if (!bootstrapTokens.isEmpty())
                 {
-                    sb.append(entry.getValue() + ":" + entry.getKey());
+                    sb.append("Bootstrapping Tokens:" );
                     sb.append(System.getProperty("line.separator"));
+                    for (Map.Entry<Token, InetAddress> entry : bootstrapTokens.entrySet())
+                    {
+                        sb.append(entry.getValue() + ":" + entry.getKey());
+                        sb.append(System.getProperty("line.separator"));
+                    }
                 }
             }
 
@@ -707,13 +708,43 @@ public class TokenMetadata
     }
 
     /**
-     * Return the Token to Endpoint map for all the node in the cluster, including bootstrapping ones.
+     * @return a token to endpoint map to consider for read operations on the cluster.
      */
-    public Map<Token, InetAddress> getTokenToEndpointMap()
+    public Map<Token, InetAddress> getTokenToEndpointMapForReading()
     {
-        Map<Token, InetAddress> map = new HashMap<Token, InetAddress>(tokenToEndpointMap.size() + bootstrapTokens.size());
-        map.putAll(tokenToEndpointMap);
-        map.putAll(bootstrapTokens);
-        return map;
+        lock.readLock().lock();
+        try
+        {
+            Map<Token, InetAddress> map = new HashMap<Token, InetAddress>(tokenToEndpointMap.size());
+            map.putAll(tokenToEndpointMap);
+            return map;
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * @return a (stable copy, won't be modified) Token to Endpoint map for all the normal and bootstrapping nodes
+     *         in the cluster.
+     */
+    public Map<Token, InetAddress> getNormalAndBootstrappingTokenToEndpointMap()
+    {
+        lock.readLock().lock();
+        try
+        {
+            Map<Token, InetAddress> map = new HashMap<Token, InetAddress>(tokenToEndpointMap.size() + bootstrapTokens.size());
+            map.putAll(tokenToEndpointMap);
+            synchronized (bootstrapTokens)
+            {
+                map.putAll(bootstrapTokens);
+            }
+            return map;
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 }
