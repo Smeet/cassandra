@@ -69,7 +69,7 @@ public class CachedRowSliceIterator extends SimpleAbstractColumnIterator impleme
 
     private void read(ByteBuffer row, int limit) throws IOException
     {
-        cf = ColumnFamily.create(metadata, ArrayBackedSortedColumns.factory());
+        cf = ColumnFamily.create(metadata, ArrayBackedSortedColumns.factory(), reversed);
         CacheRowSerializer.deserializeFromSSTableNoColumns(row, cf);
         if (limit <= 0 || noMergeNecessary)
         {
