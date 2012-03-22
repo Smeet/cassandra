@@ -1,6 +1,7 @@
 package org.apache.cassandra.db.columniterator;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -32,34 +33,61 @@ public class CachedRowSliceIteratorTest
     public void testUnboundedSlicing()
     {
         CachedRowSliceIterator iter;
+
+        FileDataInput row = getRow(10);
+        iter = new CachedRowSliceIterator(CF_META_DATA, row, null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 0, false, true);
+        for (int i = 0; i < 10; i++) 
+        {
+            assertTrue(iter.hasNext());
+            IColumn next = iter.next();
+            assertEquals(bytes(i * 2 + 2), next.name());
+        }        
+        assertFalse(iter.hasNext());
+
+        iter = new CachedRowSliceIterator(CF_META_DATA, row, null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 0, true, true);
+        for (int i = 9; i>=0; i--)
+        {
+            assertTrue(iter.hasNext());
+            IColumn next = iter.next();
+            assertEquals(bytes(i * 2 + 2), next.name());
+        }
+        assertFalse(iter.hasNext());
         
-        iter = new CachedRowSliceIterator(CF_META_DATA, getRow(10), null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 0, false, true);
+        iter = new CachedRowSliceIterator(CF_META_DATA, row, null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 10, false, false);
         for (int i = 0; i < 10; i++) 
         {
+            assertTrue(iter.hasNext());
             IColumn next = iter.next();
             assertEquals(bytes(i * 2 + 2), next.name());
         }
-
-        iter = new CachedRowSliceIterator(CF_META_DATA, getRow(10), null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 0, true, true);
+        assertFalse(iter.hasNext());
+        
+        iter = new CachedRowSliceIterator(CF_META_DATA, row, null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 10, true, false);
         for (int i = 9; i>=0; i--)
         {
+            assertTrue(iter.hasNext());
             IColumn next = iter.next();
             assertEquals(bytes(i * 2 + 2), next.name());
         }
-
-        iter = new CachedRowSliceIterator(CF_META_DATA, getRow(10), null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 10, false, false);
+        assertFalse(iter.hasNext());
+        
+        iter = new CachedRowSliceIterator(CF_META_DATA, row, null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 12, false, false);
         for (int i = 0; i < 10; i++) 
         {
+            assertTrue(iter.hasNext());
             IColumn next = iter.next();
             assertEquals(bytes(i * 2 + 2), next.name());
         }
-
-        iter = new CachedRowSliceIterator(CF_META_DATA, getRow(10), null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 10, true, false);
+        assertFalse(iter.hasNext());
+        
+        iter = new CachedRowSliceIterator(CF_META_DATA, row, null, EMPTY_BYTE_BUFFER, EMPTY_BYTE_BUFFER, 12, true, false);
         for (int i = 9; i>=0; i--)
         {
+            assertTrue(iter.hasNext());
             IColumn next = iter.next();
             assertEquals(bytes(i * 2 + 2), next.name());
         }
+        assertFalse(iter.hasNext());
     }
     
     @Test
@@ -661,8 +689,15 @@ public class CachedRowSliceIteratorTest
     private ColumnFamily getColumnFamily(int numCols)
     {
         ColumnFamily columns = ColumnFamily.create(CF_META_DATA);
-        for (int i = 0; i < numCols; i++)
-            columns.addColumn(QueryPath.column(bytes(i * 2 + 2)), bytes(0), timestamp());
+        for (int i = 0; i < numCols; i++) {
+            int num = (int) (Math.random() * 3.0);
+            StringBuilder builder = new StringBuilder();
+            for (int j = 0; j < num; j++) {
+                builder.append(j);
+            }
+            ByteBuffer value = bytes(builder.toString(), Charset.forName("UTF-8"));
+            columns.addColumn(QueryPath.column(bytes(i * 2 + 2)), value, timestamp());
+        }
         return columns;
     }
 
