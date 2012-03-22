@@ -65,7 +65,7 @@ public class Memtable
     // size in memory can never be less than serialized size
     private static final double MIN_SANE_LIVE_RATIO = 1.0;
     // max liveratio seen w/ 1-byte columns on a 64-bit jvm was 19. If it gets higher than 64 something is probably broken.
-    private static final double MAX_SANE_LIVE_RATIO = 64.0;
+    private static final double MAX_SANE_LIVE_RATIO = 20.0;
 
     // we're careful to only allow one count to run at a time because counting is slow
     // (can be minutes, for a large memtable and a busy server), so we could keep memtables
@@ -190,11 +190,18 @@ public class Memtable
                 }
                 if (newRatio > MAX_SANE_LIVE_RATIO)
                 {
-                    logger.warn("setting live ratio to maximum of 64 instead of {}", newRatio);
+                    logger.warn("setting live ratio to maximum of 64 instead of {}. deepSize was {} and currentThrouput is {}", 
+                                new Object[] {newRatio, deepSize, currentThroughput.get()});
+                    
                     newRatio = MAX_SANE_LIVE_RATIO;
                 }
-                cfs.liveRatio = Math.max(cfs.liveRatio, newRatio);
 
+                if (newRatio > cfs.liveRatio) {
+                    cfs.liveRatio = newRatio;
+                } else {
+                    cfs.liveRatio = (cfs.liveRatio + newRatio) / 2.0;
+                }
+                        
                 logger.info("{} liveRatio is {} (just-counted was {}).  calculation took {}ms for {} columns",
                             new Object[]{ cfs, cfs.liveRatio, newRatio, System.currentTimeMillis() - start, objects });
                 activelyMeasuring = null;
