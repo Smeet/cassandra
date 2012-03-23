@@ -1057,7 +1057,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
                 filter.collateColumns(returnCF, iterators, getComparator(), gcBefore());
 
-                sstCache.put(key, CachedDataInput.serialize(returnCF));
+                cacheSstRow(key, returnCF);
             }
         }
     }
@@ -1283,14 +1283,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         {                                    
             // for cache = false: we dont cache the cf itself
             ColumnFamily cf = getTopLevelColumns(QueryFilter.getIdentityFilter(key, new QueryPath(columnFamily)), gcBefore, false);
-            if (cf != null) {
-                if (CFMetaData.USE_SSTABLE_CACHE_V2) {
-                    buffer = CacheRowSerializer.serialize(cf);
-                } else {
-                    buffer = CachedDataInput.serialize(cf);
-                }
-                sstCache.put(key, buffer);
-
+            if (cf != null) 
+            {
+                cacheSstRow(key, cf);
                 return filterColumnFamily(cf, filter, gcBefore);
             }
 
@@ -1303,6 +1298,17 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             return collationController.getColumns();
         }
 
+    }
+
+    private void cacheSstRow(DecoratedKey key, ColumnFamily cf)
+    {
+        ByteBuffer buffer;
+        if (CFMetaData.USE_SSTABLE_CACHE_V2) 
+            buffer = CacheRowSerializer.serialize(cf);
+        else
+            buffer = CachedDataInput.serialize(cf);
+
+        sstCache.put(key, buffer);
     }
 
     /**
