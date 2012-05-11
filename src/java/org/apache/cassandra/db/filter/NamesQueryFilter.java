@@ -29,7 +29,6 @@ import org.apache.cassandra.db.IColumnContainer;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.SuperColumn;
 import org.apache.cassandra.db.columniterator.CachedRowNamesIterator;
-import org.apache.cassandra.db.columniterator.DataInputNamesIterator;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.db.columniterator.SSTableNamesIterator;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -74,11 +73,7 @@ public class NamesQueryFilter implements IFilter
 
     public IColumnIterator getDataInputIterator(CFMetaData metadata, FileDataInput file, DecoratedKey key, boolean noMergeNecessary)
     {
-        if (CFMetaData.USE_SSTABLE_CACHE_V2) {
-            return new CachedRowNamesIterator(metadata, file, key, columns);
-        } else {
-            return new DataInputNamesIterator(metadata, file, key, columns);
-        }
+        return new CachedRowNamesIterator(metadata, file, key, columns);
     }
 
     public SuperColumn filterSuperColumn(SuperColumn superColumn, int gcBefore)

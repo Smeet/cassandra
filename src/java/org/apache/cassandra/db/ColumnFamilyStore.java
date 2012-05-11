@@ -1302,12 +1302,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     private void cacheSstRow(DecoratedKey key, ColumnFamily cf)
     {
-        ByteBuffer buffer;
-        if (CFMetaData.USE_SSTABLE_CACHE_V2) 
-            buffer = CacheRowSerializer.serialize(cf);
-        else
-            buffer = CachedDataInput.serialize(cf);
-
+        ByteBuffer buffer = CacheRowSerializer.serialize(cf);
         sstCache.put(key, buffer);
     }
 

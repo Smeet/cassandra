@@ -95,7 +95,6 @@ public final class CFMetaData
     public static final CFMetaData VersionCf = newSystemMetadata(SystemTable.VERSION_CF, 7, "server version information", UTF8Type.instance, null);
 
     public static final boolean USE_SSTABLE_CACHE    = Boolean.getBoolean("useSSTableCache");
-    public static final boolean USE_SSTABLE_CACHE_V2 = Boolean.getBoolean("useSSTableCacheV2");
     
     static
     {
